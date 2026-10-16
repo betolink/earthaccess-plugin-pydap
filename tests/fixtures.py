@@ -1,10 +1,10 @@
-"""Conformance fixtures for PyDAP: real UMM, patched xarray/pydap seam."""
+"""Conformance fixtures for PyDAP: real UMM, no backend patch needed."""
 
 from __future__ import annotations
 
+import contextlib
 from contextlib import AbstractContextManager
 from typing import Any
-from unittest import mock
 
 from earthaccess_plugin_spec.results import GranuleResultSet
 from earthaccess_plugin_spec.testing import Fixtures
@@ -30,25 +30,14 @@ def make_granule(
 
 
 class PyDAPFixtures(Fixtures):
-    def __init__(self, dataset: Any = None, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         kwargs.setdefault("result_set", GranuleResultSet([make_granule()]))
         kwargs.setdefault(
             "unsupported_result_set",
-            GranuleResultSet(
-                [
-                    make_granule(
-                        collection_id="C-NO-OPENDAP",
-                        urls=[],
-                    )
-                ]
-            ),
+            GranuleResultSet([make_granule(collection_id="C-NO-OPENDAP", urls=[])]),
         )
         super().__init__(**kwargs)
-        self.dataset = dataset if dataset is not None else object()
 
     def backend(self) -> AbstractContextManager[Any]:
-        import earthaccess_pydap.plugin as plugin_mod
-
-        return mock.patch.object(
-            plugin_mod, "_open", lambda urls, session, options: self.dataset
-        )
+        # The xarray client only builds URLs; nothing to patch.
+        return contextlib.nullcontext()

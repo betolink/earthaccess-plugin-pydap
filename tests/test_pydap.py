@@ -1,15 +1,33 @@
+import sys
+import types
+
 import pytest
-from earthaccess_plugin_spec import (
-    Capability,
-    UnsupportedCollectionError,
-)
+from earthaccess_plugin_spec import Asset, Capability, UnsupportedCollectionError
 from earthaccess_plugin_spec.results import GranuleResultSet
 from earthaccess_plugin_spec.testing import fake_context
 
 from earthaccess_pydap import NoOPeNDAPUrlsError, PyDAPPlugin
-from earthaccess_pydap.plugin import with_scheme
+from earthaccess_pydap.plugin import with_constraint, with_scheme
 
 from .fixtures import PyDAPFixtures, make_granule
+
+
+def fake_pydap(monkeypatch):
+    """Inject a fake ``pydap.client.open_url`` and return the call list."""
+
+    calls: list[dict] = []
+
+    def open_url(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return {"url": url, **kwargs}
+
+    client = types.ModuleType("pydap.client")
+    client.open_url = open_url
+    package = types.ModuleType("pydap")
+    package.client = client
+    monkeypatch.setitem(sys.modules, "pydap", package)
+    monkeypatch.setitem(sys.modules, "pydap.client", client)
+    return calls
 
 
 class TestUrlExtraction:
@@ -25,15 +43,7 @@ class TestUrlExtraction:
         from earthaccess_pydap.plugin import opendap_urls
 
         rs = GranuleResultSet(
-            [
-                make_granule(
-                    urls=[
-                        "https://e.org/a.dap",
-                        "https://e.org/a.dap",
-                        "https://e.org/b.dap",
-                    ]
-                )
-            ]
+            [make_granule(urls=["https://e.org/a.dap", "https://e.org/b.dap"])]
         )
         assert opendap_urls(rs, needle="a.dap") == ["https://e.org/a.dap"]
 
@@ -48,7 +58,7 @@ class TestUrlExtraction:
         assert opendap_urls(GranuleResultSet([granule])) == ["https://e.org/x"]
 
 
-class TestWithScheme:
+class TestSchemeAndConstraint:
     @pytest.mark.parametrize(
         ("url", "protocol", "expected"),
         [
@@ -60,21 +70,20 @@ class TestWithScheme:
     def test_scheme(self, url, protocol, expected):
         assert with_scheme(url, protocol) == expected
 
+    def test_constraint_empty(self):
+        assert with_constraint("dap4://e/a", []) == "dap4://e/a"
+
+    def test_constraint_selects_variables(self):
+        url = with_constraint("dap4://e/a", ["lon", "lat", "time"])
+        assert url == "dap4://e/a?dap4.ce=/lon;/lat;/time"
+
 
 class TestOptions:
-    def test_defaults_are_opendap_friendly(self):
+    def test_defaults(self):
         options = PyDAPPlugin.Options()
-        assert options.combine == "nested"
-        assert options.concat_dim == "time"
-        assert options.chunks is None
-
-    def test_nested_requires_concat_dim(self):
-        with pytest.raises(ValueError, match="concat_dim"):
-            PyDAPPlugin.Options(combine="nested", concat_dim=None)
-
-    def test_nested_ok_with_concat_dim(self):
-        options = PyDAPPlugin.Options(combine="nested", concat_dim="time")
-        assert options.concat_dim == "time"
+        assert options.client == "xarray"
+        assert options.protocol == "dap4"
+        assert options.variables == []
 
     def test_unknown_option_rejected(self):
         plugin = PyDAPPlugin(fake_context())
@@ -82,132 +91,53 @@ class TestOptions:
             plugin.request(PyDAPFixtures().result_set, nope=1)
 
 
-class TestOpen:
-    @staticmethod
-    def _fake_xarray(monkeypatch, **functions):
-        import sys
-        import types
-
-        module = types.ModuleType("xarray")
-        for name, fn in functions.items():
-            setattr(module, name, fn)
-        monkeypatch.setitem(sys.modules, "xarray", module)
-
-    def test_single_granule_is_lazy(self, monkeypatch):
-        from earthaccess_pydap.plugin import PyDAPPlugin, _open
-
-        captured: dict = {}
-        self._fake_xarray(
-            monkeypatch,
-            open_dataset=lambda url, **kw: captured.update(url=url, kw=kw) or "ds",
-        )
-        assert _open(["dap4://e/a"], "sess", PyDAPPlugin.Options()) == "ds"
-        assert captured["kw"]["engine"] == "pydap"
-        assert "chunks" not in captured["kw"]  # numpy-lazy => subset pushes down
-
-    def test_multi_granule_is_nested_and_chunked(self, monkeypatch):
-        from earthaccess_pydap.plugin import PyDAPPlugin, _open
-
-        captured: dict = {}
-        self._fake_xarray(
-            monkeypatch,
-            open_mfdataset=lambda urls, **kw: captured.update(urls=urls, kw=kw),
-        )
-        _open(["a", "b"], "sess", PyDAPPlugin.Options())
-        assert captured["kw"]["combine"] == "nested"
-        assert captured["kw"]["concat_dim"] == "time"
-        assert captured["kw"]["parallel"] is True
-        assert captured["kw"]["chunks"] == "auto"
-
-    def test_multi_granule_respects_explicit_chunks(self, monkeypatch):
-        from earthaccess_pydap.plugin import PyDAPPlugin, _open
-
-        captured: dict = {}
-        self._fake_xarray(
-            monkeypatch, open_mfdataset=lambda urls, **kw: captured.update(kw=kw)
-        )
-        _open(["a", "b"], "sess", PyDAPPlugin.Options(chunks={"lat": 400, "lon": 400}))
-        assert captured["kw"]["chunks"] == {"lat": 400, "lon": 400}
-
-
 class TestRequest:
+    def test_xarray_client_yields_asset_urls(self):
+        plugin = PyDAPPlugin(fake_context())
+        assets = plugin.request(PyDAPFixtures().result_set).results()
+        assert assets == [
+            Asset(href="dap4://example.org/g1.dap", access="opendap", auth="edl")
+        ]
+
+    def test_variables_become_a_constraint(self):
+        plugin = PyDAPPlugin(fake_context())
+        assets = plugin.request(
+            PyDAPFixtures().result_set, variables=["lon", "analysed_sst"]
+        ).results()
+        assert assets[0].href == (
+            "dap4://example.org/g1.dap?dap4.ce=/lon;/analysed_sst"
+        )
+
+    def test_capabilities_asset_kind(self):
+        plugin = PyDAPPlugin(fake_context())
+        job = plugin.request(PyDAPFixtures().result_set)
+        assert job.output == "assets"
+
+    def test_pydap_client_yields_native_datasets(self, monkeypatch):
+        calls = fake_pydap(monkeypatch)
+        plugin = PyDAPPlugin(fake_context())
+        job = plugin.request(
+            PyDAPFixtures().result_set, client="pydap", variables=["lat"]
+        )
+        assert job.output == "opendap"
+        datasets = job.results()
+        assert datasets[0]["url"] == "dap4://example.org/g1.dap?dap4.ce=/lat"
+        assert datasets[0]["protocol"] == "dap4"
+        assert calls[0]["url"] == "dap4://example.org/g1.dap?dap4.ce=/lat"
+
     def test_no_urls_raises(self):
         plugin = PyDAPPlugin(fake_context())
         granule = make_granule()
         granule["umm"]["RelatedUrls"] = [{"Type": "GET DATA", "URL": "https://e.org/y"}]
-        # check=False bypasses the support gate and reaches the backend seam.
+        # check=False bypasses the capability gate and reaches the request.
         with pytest.raises(NoOPeNDAPUrlsError):
-            plugin.request(GranuleResultSet([granule]), check=False)
+            plugin.request(GranuleResultSet([granule]), check=False).results()
 
-    def test_session_is_used_and_login_is_eager(self):
+    def test_session_is_requested_up_front(self):
         ctx = fake_context()
         plugin = PyDAPPlugin(ctx)
-        fixtures = PyDAPFixtures()
-        with fixtures.backend():
-            job = plugin.request(fixtures.result_set)
-            result = job.results()
+        plugin.request(PyDAPFixtures().result_set)
         assert ctx.auth.session_calls == 1
-        assert result is fixtures.dataset
-
-    def test_protocol_is_forwarded(self):
-        captured: dict = {}
-
-        def fake_open(urls, session, options):
-            captured["urls"] = urls
-            return "ds"
-
-        from unittest import mock
-
-        import earthaccess_pydap.plugin as plugin_mod
-
-        plugin = PyDAPPlugin(fake_context())
-        fixtures = PyDAPFixtures()
-        with mock.patch.object(plugin_mod, "_open", fake_open):
-            result = plugin.request(fixtures.result_set, protocol="dap2").results()
-        assert result == "ds"
-        assert captured["urls"] == ["dap2://example.org/g1.dap"]
-
-
-class TestEngine:
-    @staticmethod
-    def _fake_pydap(monkeypatch):
-        import sys
-        import types
-
-        fake_client = types.ModuleType("pydap.client")
-        fake_client.open_url = lambda url, **kw: {"url": url, **kw}
-        fake_pydap = types.ModuleType("pydap")
-        fake_pydap.client = fake_client
-        monkeypatch.setitem(sys.modules, "pydap", fake_pydap)
-        monkeypatch.setitem(sys.modules, "pydap.client", fake_client)
-
-    def test_default_engine_is_xarray(self):
-        assert PyDAPPlugin.Options().engine == "xarray"
-
-    def test_engine_pydap_single_returns_dataset(self, monkeypatch):
-        from earthaccess_pydap.plugin import PyDAPPlugin, _open
-
-        self._fake_pydap(monkeypatch)
-        dataset = _open(["dap4://e/a"], "sess", PyDAPPlugin.Options(engine="pydap"))
-        assert dataset == {"url": "dap4://e/a", "protocol": "dap4", "session": "sess"}
-
-    def test_engine_pydap_multiple_returns_list(self, monkeypatch):
-        from earthaccess_pydap.plugin import PyDAPPlugin, _open
-
-        self._fake_pydap(monkeypatch)
-        datasets = _open(
-            ["dap4://e/a", "dap4://e/b"], "sess", PyDAPPlugin.Options(engine="pydap")
-        )
-        assert isinstance(datasets, list)
-        assert [d["url"] for d in datasets] == ["dap4://e/a", "dap4://e/b"]
-
-    def test_engine_pydap_via_request(self, monkeypatch):
-        from earthaccess_pydap.plugin import PyDAPPlugin
-
-        self._fake_pydap(monkeypatch)
-        plugin = PyDAPPlugin(fake_context())
-        result = plugin.request(PyDAPFixtures().result_set, engine="pydap").results()
-        assert result["url"] == "dap4://example.org/g1.dap"
 
 
 def test_entry_point_registered():
@@ -229,10 +159,8 @@ class TestSupport:
         }
 
     def test_capabilities_alias_by_short_name_is_unknown(self):
-        # A short name alone carries no granule links, so OPeNDAP can't be confirmed.
         plugin = PyDAPPlugin(fake_context())
-        capabilities = plugin.capabilities("MUR-JPL-L4-GLOB-v4.1")
-        assert capabilities.ok is None
+        assert plugin.capabilities("MUR-JPL-L4-GLOB-v4.1").ok is None
 
     def test_unsupported_without_links(self):
         plugin = PyDAPPlugin(fake_context())
@@ -250,8 +178,8 @@ class TestSupport:
         plugin = PyDAPPlugin(fake_context())
         unsupported = GranuleResultSet([make_granule(collection_id="C-X", urls=[])])
         with (
-            mock.patch.object(plugin_mod, "_open") as open_mock,
+            mock.patch.object(plugin_mod, "_native_datasets") as native_mock,
             pytest.raises(UnsupportedCollectionError),
         ):
             plugin.request(unsupported)
-        open_mock.assert_not_called()
+        native_mock.assert_not_called()

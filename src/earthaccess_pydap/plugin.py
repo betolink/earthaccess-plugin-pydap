@@ -1,16 +1,21 @@
-"""The PyDAP plugin: lazy OPeNDAP access through xarray or native pydap.
+"""The PyDAP plugin: OPeNDAP access expressed as a request.
 
-``request(engine="xarray")`` (the default) returns a lazy xarray Dataset;
-``request(engine="pydap")`` returns the native pydap dataset(s) from
-``open_url``. Either way the flow is ``request()`` -> ``Job`` -> ``results()``.
+``pydap.request(results, client="xarray")`` returns a completed job whose
+``results()`` is a list of :class:`Asset` objects: the OPeNDAP DAP4 URLs with a
+constraint expression for the requested ``variables``. Open them with xarray
+(``engine="pydap"``) and whatever kwargs your data needs -- the plugin does not
+open OPeNDAP itself, because that often needs tuning.
+
+``pydap.request(results, client="pydap")`` returns the native pydap datasets
+from ``pydap.open_url``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from earthaccess_plugin_spec import Capabilities, Capability, PluginBase
+from earthaccess_plugin_spec import Asset, Capabilities, Capability, PluginBase
 
 from .errors import NoOPeNDAPUrlsError
 
@@ -30,27 +35,16 @@ class PyDAPPlugin(PluginBase):
     name = "pydap"
     needs = frozenset({"umm"})
     auth = "edl"
-    output = "xarray"
+    output = "assets"
 
     @dataclass
     class Options:
-        # "xarray": a lazy xarray.Dataset; "pydap": the native pydap dataset(s).
-        engine: Literal["xarray", "pydap"] = "xarray"
+        # "xarray": assets (OPeNDAP URLs with a variable constraint) to open with
+        # xarray. "pydap": the native pydap datasets from open_url.
+        client: Literal["xarray", "pydap"] = "xarray"
         protocol: Literal["dap4", "dap2"] = "dap4"
+        variables: list[str] = field(default_factory=list)  # DAP4 constraint
         url_filter: str | None = None  # substring match on OPeNDAP hrefs
-        # Concatenating several granules needs a real concat dimension; nested is
-        # the mode that streams and lets dask push slices to the server.
-        combine: Literal["by_coords", "nested"] = "nested"
-        concat_dim: str | None = "time"
-        # Dask chunking for multi-granule opens. ``None`` keeps a single granule
-        # lazy (OPeNDAP pushes the subset down); multi-granule defaults to
-        # "auto". Pass small chunks (e.g. {"lat": 400, "lon": 400}) to fetch
-        # only your subset.
-        chunks: Any = None
-
-        def __post_init__(self) -> None:
-            if self.combine == "nested" and self.concat_dim is None:
-                raise ValueError("combine=nested requires concat_dim")
 
     def _request(self, results: Any, options: Options) -> Any:
         urls = [
@@ -61,9 +55,20 @@ class PyDAPPlugin(PluginBase):
             raise NoOPeNDAPUrlsError(
                 f"no OPeNDAP links in the UMM for {results.collection_id}"
             )
+        constrained = [with_constraint(url, options.variables) for url in urls]
         # Login happens here, on the caller's thread, not in the worker.
         session = self._ctx.auth.session()
-        return self.job(lambda: _open(urls, session, options))
+
+        if options.client == "pydap":
+            return self.job(
+                lambda: _native_datasets(constrained, session, options.protocol),
+                output="opendap",
+            )
+        return self.job(
+            lambda: [
+                Asset(href=url, access="opendap", auth="edl") for url in constrained
+            ]
+        )
 
     def _supports(self, results: Any) -> Capabilities:
         # Granule links are better evidence than a collection association,
@@ -91,47 +96,12 @@ def _has_granules(results: Any) -> bool:
     return bool(list(umm())) if callable(umm) else False
 
 
-def _open(urls: list[str], session: Any, options: Any) -> Any:
-    if options.engine == "pydap":
-        return _native_datasets(urls, session, options.protocol)
-
-    import xarray as xr
-
-    if len(urls) == 1:
-        # One OPeNDAP dataset: keep it lazy (numpy-backed). xarray pushes the
-        # subset straight to the server, so only the requested slice is fetched;
-        # wrapping it in dask would download the whole variable.
-        extra = {} if options.chunks is None else {"chunks": options.chunks}
-        return xr.open_dataset(urls[0], engine="pydap", session=session, **extra)
-    # Several granules: dask is required to concatenate lazily. Chunk so a
-    # subset maps to server-side constraint expressions instead of whole files.
-    chunks = options.chunks if options.chunks is not None else "auto"
-    extra = {"concat_dim": options.concat_dim} if options.combine == "nested" else {}
-    return xr.open_mfdataset(
-        urls,
-        engine="pydap",
-        session=session,
-        combine=options.combine,
-        parallel=True,
-        chunks=chunks,
-        **extra,
-    )
-
-
-def _native_datasets(urls: list[str], session: Any, protocol: str) -> Any:
-    """The raw pydap datasets: one per OPeNDAP URL (a granule URL is one file).
-
-    A single URL returns its dataset; several return a list. This is metadata
-    plus lazy arrays, so ``.tree()`` and native operations work without
-    downloading data.
-    """
-
+def _native_datasets(urls: list[str], session: Any, protocol: str) -> list[Any]:
     import pydap.client
 
-    datasets = [
+    return [
         pydap.client.open_url(url, protocol=protocol, session=session) for url in urls
     ]
-    return datasets[0] if len(datasets) == 1 else datasets
 
 
 def opendap_urls(results: Any, needle: str | None = None) -> list[str]:
@@ -153,7 +123,14 @@ def opendap_urls(results: Any, needle: str | None = None) -> list[str]:
 
 
 def with_scheme(url: str, protocol: str) -> str:
-    # VERIFY: whether OPeNDAP URLs carry suffixes such as .html or .dmr to strip.
     if url.startswith(("dap2://", "dap4://")):
         return url
     return protocol + "://" + url.split("://", 1)[-1]
+
+
+def with_constraint(url: str, variables: list[str]) -> str:
+    """Append a DAP4 constraint expression selecting ``variables`` (if any)."""
+
+    if not variables:
+        return url
+    return url + "?dap4.ce=" + ";".join("/" + name for name in variables)

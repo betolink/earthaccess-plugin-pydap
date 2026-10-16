@@ -1,6 +1,6 @@
 # earthaccess-pydap
 
-Lazy [OPeNDAP](https://www.opendap.org/) access to Earthdata granules through
+OPeNDAP access to Earthdata granules through
 [PyDAP](https://www.pydap.org/) and xarray, via earthaccess.
 
 ## What OPeNDAP and PyDAP do
@@ -8,13 +8,15 @@ Lazy [OPeNDAP](https://www.opendap.org/) access to Earthdata granules through
 OPeNDAP (DAP2/DAP4) is a protocol for accessing remote scientific data without
 downloading whole files. An OPeNDAP server reads a dataset natively and serves
 slices of it, so you can request only the variables, coordinates and time range
-you need. PyDAP is the Python client for that protocol, and xarray can open
-PyDAP responses directly (`engine="pydap"`), giving you a familiar lazy
-`xarray.Dataset` that pulls data on demand.
+you need. PyDAP is the Python client for that protocol, and xarray opens PyDAP
+responses with `engine="pydap"`, giving you a lazy `xarray.Dataset` that pulls
+data on demand.
 
-This plugin finds the OPeNDAP links in a granule's UMM, opens one granule as a
-dataset (or several combined), and returns a lazy dataset. Nothing is downloaded
-until you actually compute with it.
+This plugin is a **request**: it finds the OPeNDAP links in a granule's UMM and
+returns a completed `Job`. Depending on `client`, `results()` gives you either
+the OPeNDAP URLs to open with xarray, or the native pydap datasets. The plugin
+deliberately does not open the data itself, because opening often needs xarray
+kwargs tuned to the dataset.
 
 ## Install
 
@@ -26,49 +28,36 @@ pip install earthaccess-pydap
 
 ```python
 import earthaccess as ea
+import xarray as xr
 
-results = ea.search_data(short_name="MODISA_L2_OC", ...)
+results = ea.search_data(short_name="MUR-JPL-L4-GLOB-v4.1", ...)
 
-ds = ea.plugins.pydap.request(results, protocol="dap4").results()
-# ds is a lazy xarray.Dataset; the data is fetched as you use it
-subset = ds["chlor_a"].sel(lat=slice(40, 50)).mean()
+# client="xarray" (default): assets are OPeNDAP DAP4 URLs with a variable
+# constraint, ready for xarray.
+assets = ea.plugins.pydap.request(
+    results, variables=["analysed_sst", "lat", "lon", "time"]
+).results()
+urls = [asset.href for asset in assets]
+
+session = ea.get_requests_https_session()
+ds = xr.open_mfdataset(
+    urls,
+    engine="pydap",
+    session=session,
+    combine="nested",
+    concat_dim="time",
+    parallel=True,
+    chunks={"lat": 400, "lon": 400},  # chunk to your subset
+)
 ```
 
-`request()` returns a `Job`; `results()` blocks and returns the dataset. Because
-that object is already lazy and usable, `ea.open(job)` returns it as-is:
+A single granule: `xr.open_dataset(urls[0], engine="pydap", session=session)`.
+
+`client="pydap"` returns the native pydap datasets instead (metadata plus lazy
+arrays), for navigating the file and its native operations:
 
 ```python
-ds = ea.open(ea.plugins.pydap.request(results))
-```
-
-### Access pattern (important for speed)
-
-A **single granule** is opened lazily (`xr.open_dataset`), so xarray pushes your
-subset to the OPeNDAP server as a constraint expression and only the slice you
-ask for is downloaded:
-
-```python
-ds = ea.plugins.pydap.request(one_granule).results()
-ds["analysed_sst"].sel(lon=slice(-98, -80), lat=slice(18, 31)).plot()
-```
-
-For **several granules** the plugin concatenates them lazily with dask
-(`combine="nested"`, `parallel=True`). Dask fetches whole chunks, so pass
-`chunks` sized to your subset or you will download far more than you need:
-
-```python
-ds = ea.plugins.pydap.request(many_granules, chunks={"lat": 400, "lon": 400}).results()
-```
-
-### Inspect the remote file
-
-`request()` takes an `engine`: `"xarray"` (default) returns a lazy
-`xarray.Dataset`, `"pydap"` returns the native dataset from `pydap.open_url`
-(one per granule URL; a list for several). Use the native dataset to list
-variables and operations without downloading data:
-
-```python
-pyds = ea.plugins.pydap.request(results, engine="pydap").results()
+pyds = ea.plugins.pydap.request(results, client="pydap").results()[0]
 pyds.tree()
 list(pyds.keys())
 ```
@@ -77,28 +66,30 @@ list(pyds.keys())
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `engine` | `"xarray"` | `"xarray"` -> lazy `xarray.Dataset`; `"pydap"` -> native pydap dataset(s) |
+| `client` | `"xarray"` | `"xarray"` -> asset URLs with a DAP4 constraint; `"pydap"` -> native pydap datasets |
 | `protocol` | `"dap4"` | OPeNDAP scheme: `dap4` or `dap2` |
+| `variables` | `[]` | variables for the constraint expression (`?dap4.ce=/lon;/lat;...`) |
 | `url_filter` | `None` | keep only hrefs containing this substring |
-| `combine` | `"nested"` | how to combine several granules: `by_coords` or `nested` |
-| `concat_dim` | `"time"` | concat dimension when `combine="nested"` |
-| `chunks` | `None` | dask chunking for multi-granule opens (`"auto"` by default); pass e.g. `{"lat": 400, "lon": 400}` to fetch only your subset |
 
-Combining several granules into one dataset:
+The generated URL looks like:
 
-```python
-ds = ea.plugins.pydap.request(many_granules, concat_dim="time", chunks={"lat": 400, "lon": 400}).results()
 ```
+dap4://opendap.earthdata.nasa.gov/collections/C.../granules/...?dap4.ce=/lon;/lat;/time
+```
+
+## Access pattern (important for speed)
+
+xarray only pushes your subset to the server when the array is kept lazy. A
+single granule opened with `xr.open_dataset(..., engine="pydap")` is lazy, so
+`.sel(...)` becomes a server-side constraint and only the slice is fetched. For
+several granules, dask is involved, so pass `chunks` sized to your subset (as
+above) or it will fetch whole files.
 
 ## Authentication
 
 OPeNDAP links on NASA DAACs require Earthdata Login. The plugin uses your
-earthaccess EDL session (`auth = "edl"`), so log in first — the plugin does it
-for you if you have not:
-
-```python
-ea.login(strategy="netrc")
-```
+earthaccess EDL session (`auth = "edl"`); get one for xarray with
+`session = ea.get_requests_https_session()`.
 
 ## Checking that a collection is supported
 
@@ -110,9 +101,6 @@ subsetting):
 ea.plugins.pydap.supports(results)
 # Capabilities('pydap supported C1996881146-POCLOUD', operations=3)
 #   operations: lazy_read, subset_dimension, subset_variable
-
-# By short name alone there are no granule links to confirm against:
-ea.plugins.pydap.capabilities("MUR-JPL-L4-GLOB-v4.1")  # ok=None
 ```
 
 ## License
