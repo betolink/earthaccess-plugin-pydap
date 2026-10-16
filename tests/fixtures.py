@@ -32,6 +32,17 @@ def make_granule(
 class PyDAPFixtures(Fixtures):
     def __init__(self, dataset: Any = None, **kwargs: Any) -> None:
         kwargs.setdefault("result_set", GranuleResultSet([make_granule()]))
+        kwargs.setdefault(
+            "unsupported_result_set",
+            GranuleResultSet(
+                [
+                    make_granule(
+                        collection_id="C-NO-OPENDAP",
+                        urls=[],
+                    )
+                ]
+            ),
+        )
         super().__init__(**kwargs)
         self.dataset = dataset if dataset is not None else object()
 

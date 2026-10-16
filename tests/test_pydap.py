@@ -1,4 +1,5 @@
 import pytest
+from earthaccess_plugin_spec import Support, UnsupportedCollectionError
 from earthaccess_plugin_spec.results import GranuleResultSet
 from earthaccess_plugin_spec.testing import fake_context
 
@@ -67,8 +68,9 @@ class TestRequest:
         plugin = PyDAPPlugin(fake_context())
         granule = make_granule()
         granule["umm"]["RelatedUrls"] = [{"Type": "GET DATA", "URL": "https://e.org/y"}]
+        # check=False bypasses the support gate and reaches the backend seam.
         with pytest.raises(NoOPeNDAPUrlsError):
-            plugin.request(GranuleResultSet([granule]))
+            plugin.request(GranuleResultSet([granule]), check=False)
 
     def test_session_is_used_and_login_is_eager(self):
         ctx = fake_context()
@@ -111,3 +113,31 @@ def test_entry_point_registered():
 
     names = {ep.name for ep in entry_points(group="earthaccess.plugins")}
     assert "pydap" in names
+
+
+class TestSupport:
+    def test_supported_with_links(self):
+        plugin = PyDAPPlugin(fake_context())
+        assert plugin.supports(PyDAPFixtures().result_set) == Support(True)
+
+    def test_unsupported_without_links(self):
+        plugin = PyDAPPlugin(fake_context())
+        support = plugin.supports(
+            GranuleResultSet([make_granule(collection_id="C-X", urls=[])])
+        )
+        assert support.ok is False
+        assert "OPeNDAP" in support.reason
+
+    def test_request_raises_before_backend(self):
+        from unittest import mock
+
+        import earthaccess_pydap.plugin as plugin_mod
+
+        plugin = PyDAPPlugin(fake_context())
+        unsupported = GranuleResultSet([make_granule(collection_id="C-X", urls=[])])
+        with (
+            mock.patch.object(plugin_mod, "_open") as open_mock,
+            pytest.raises(UnsupportedCollectionError),
+        ):
+            plugin.request(unsupported)
+        open_mock.assert_not_called()

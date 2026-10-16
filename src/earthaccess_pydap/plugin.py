@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from earthaccess_plugin_spec import PluginBase
+from earthaccess_plugin_spec import PluginBase, Support
 
 from .errors import NoOPeNDAPUrlsError
 
@@ -50,6 +50,22 @@ class PyDAPPlugin(PluginBase):
         """Lazy open: returns the dataset directly."""
 
         return self.run(results, **options)
+
+    def _supports(self, results: Any) -> Support:
+        # Granule links are better evidence than a collection association,
+        # because the data opened is the granule URL.
+        urls = opendap_urls(results)
+        if urls:
+            granules = list(getattr(results, "ids", ()) or ())
+            if len(urls) < len(granules):
+                self._ctx.logger.info(
+                    "%s: %d of %d granules have an OPeNDAP link",
+                    self.name,
+                    len(urls),
+                    len(granules),
+                )
+            return Support(True)
+        return Support(False, "none of these granules has an OPeNDAP link")
 
 
 def _open(urls: list[str], session: Any, options: Any) -> Any:
