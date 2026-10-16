@@ -26,18 +26,29 @@ pip install earthaccess-pydap
 
 ## Use with earthaccess
 
+Start by inspecting a granule: `client="pydap"` returns the native pydap
+datasets (metadata plus lazy arrays), so you can navigate the file and pick the
+variables you need.
+
 ```python
 import earthaccess as ea
 import xarray as xr
 
 results = ea.search_data(short_name="MUR-JPL-L4-GLOB-v4.1", ...)
 
-# client="xarray" (default): assets are OPeNDAP DAP4 URLs with a variable
-# constraint, ready for xarray.
-assets = ea.plugins.pydap.request(
+pyds = ea.plugins.pydap.request(results, client="pydap").results()[0]
+pyds.tree()          # list(pyds.keys()) -> the variables available
+```
+
+Then request those variables. `client="xarray"` (default) yields **assets**: the
+OPeNDAP DAP4 URLs with a `?dap4.ce=...` constraint. `ea.open(job)` returns them,
+and `ea.download(job, path)` serializes the constrained data to local NetCDF:
+
+```python
+job = ea.plugins.pydap.request(
     results, variables=["analysed_sst", "lat", "lon", "time"]
-).results()
-urls = [asset.href for asset in assets]
+)
+urls = ea.open(job)          # OPeNDAP URLs, ready for xarray
 
 session = ea.get_requests_https_session()
 ds = xr.open_mfdataset(
@@ -49,18 +60,12 @@ ds = xr.open_mfdataset(
     parallel=True,
     chunks={"lat": 400, "lon": 400},  # chunk to your subset
 )
+
+# or write the constrained data to local NetCDF (one file per granule):
+# ea.download(job, "./data")
 ```
 
 A single granule: `xr.open_dataset(urls[0], engine="pydap", session=session)`.
-
-`client="pydap"` returns the native pydap datasets instead (metadata plus lazy
-arrays), for navigating the file and its native operations:
-
-```python
-pyds = ea.plugins.pydap.request(results, client="pydap").results()[0]
-pyds.tree()
-list(pyds.keys())
-```
 
 ### Options
 
@@ -84,6 +89,11 @@ single granule opened with `xr.open_dataset(..., engine="pydap")` is lazy, so
 `.sel(...)` becomes a server-side constraint and only the slice is fetched. For
 several granules, dask is involved, so pass `chunks` sized to your subset (as
 above) or it will fetch whole files.
+
+`ea.download(job, path)` writes to a **local** directory (pydap serializes
+locally, one NetCDF file per granule); it accepts OPeNDAP URLs with the variable
+constraint but no spatial or temporal slicing — use xarray directly if you need
+that. Streaming output needs `netCDF4`, which this package installs.
 
 ## Authentication
 
