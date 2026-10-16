@@ -1,7 +1,8 @@
-"""The PyDAP plugin: lazy OPeNDAP access through xarray.
+"""The PyDAP plugin: lazy OPeNDAP access through xarray or native pydap.
 
-``_open`` is isolated so the unverified xarray/pydap integration is patched in
-one place. RelatedUrls handling is pure Python and tested directly.
+``request(engine="xarray")`` (the default) returns a lazy xarray Dataset;
+``request(engine="pydap")`` returns the native pydap dataset(s) from
+``open_url``. Either way the flow is ``request()`` -> ``Job`` -> ``results()``.
 """
 
 from __future__ import annotations
@@ -9,11 +10,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from earthaccess_plugin_spec import PluginBase, Support
+from earthaccess_plugin_spec import Capabilities, Capability, PluginBase
 
 from .errors import NoOPeNDAPUrlsError
 
 __all__ = ["PyDAPPlugin"]
+
+# OPeNDAP's intrinsic capabilities (any DAP endpoint advertises these).
+_OPENDAP_OPERATIONS = frozenset(
+    {
+        Capability.LAZY_READ,
+        Capability.SUBSET_DIMENSION,
+        Capability.SUBSET_VARIABLE,
+    }
+)
 
 
 class PyDAPPlugin(PluginBase):
@@ -24,10 +34,19 @@ class PyDAPPlugin(PluginBase):
 
     @dataclass
     class Options:
+        # "xarray": a lazy xarray.Dataset; "pydap": the native pydap dataset(s).
+        engine: Literal["xarray", "pydap"] = "xarray"
         protocol: Literal["dap4", "dap2"] = "dap4"
         url_filter: str | None = None  # substring match on OPeNDAP hrefs
-        combine: Literal["by_coords", "nested"] = "by_coords"
-        concat_dim: str | None = None  # required when combine == 'nested'
+        # Concatenating several granules needs a real concat dimension; nested is
+        # the mode that streams and lets dask push slices to the server.
+        combine: Literal["by_coords", "nested"] = "nested"
+        concat_dim: str | None = "time"
+        # Dask chunking for multi-granule opens. ``None`` keeps a single granule
+        # lazy (OPeNDAP pushes the subset down); multi-granule defaults to
+        # "auto". Pass small chunks (e.g. {"lat": 400, "lon": 400}) to fetch
+        # only your subset.
+        chunks: Any = None
 
         def __post_init__(self) -> None:
             if self.combine == "nested" and self.concat_dim is None:
@@ -47,13 +66,17 @@ class PyDAPPlugin(PluginBase):
         return self.job(lambda: _open(urls, session, options))
 
     def open(self, results: Any = None, **options: Any) -> Any:
-        """Lazy open: returns the dataset directly."""
+        """Lazy open: an alias of :meth:`run`, returns the dataset directly."""
 
         return self.run(results, **options)
 
-    def _supports(self, results: Any) -> Support:
+    def _supports(self, results: Any) -> Capabilities:
         # Granule links are better evidence than a collection association,
         # because the data opened is the granule URL.
+        if not _has_granules(results):
+            return Capabilities(
+                None, reason="supply search results to check OPeNDAP links"
+            )
         urls = opendap_urls(results)
         if urls:
             granules = list(getattr(results, "ids", ()) or ())
@@ -64,20 +87,56 @@ class PyDAPPlugin(PluginBase):
                     len(urls),
                     len(granules),
                 )
-            return Support(True)
-        return Support(False, "none of these granules has an OPeNDAP link")
+            return Capabilities(True, operations=_OPENDAP_OPERATIONS)
+        return Capabilities(False, reason="none of these granules has an OPeNDAP link")
+
+
+def _has_granules(results: Any) -> bool:
+    umm = getattr(results, "umm", None)
+    return bool(list(umm())) if callable(umm) else False
 
 
 def _open(urls: list[str], session: Any, options: Any) -> Any:
-    # VERIFY: session= and dap4:// reach the pydap backend in the pinned versions.
+    if options.engine == "pydap":
+        return _native_datasets(urls, session, options.protocol)
+
     import xarray as xr
 
     if len(urls) == 1:
-        return xr.open_dataset(urls[0], engine="pydap", session=session)
+        # One OPeNDAP dataset: keep it lazy (numpy-backed). xarray pushes the
+        # subset straight to the server, so only the requested slice is fetched;
+        # wrapping it in dask would download the whole variable.
+        extra = {} if options.chunks is None else {"chunks": options.chunks}
+        return xr.open_dataset(urls[0], engine="pydap", session=session, **extra)
+    # Several granules: dask is required to concatenate lazily. Chunk so a
+    # subset maps to server-side constraint expressions instead of whole files.
+    chunks = options.chunks if options.chunks is not None else "auto"
     extra = {"concat_dim": options.concat_dim} if options.combine == "nested" else {}
     return xr.open_mfdataset(
-        urls, engine="pydap", session=session, combine=options.combine, **extra
+        urls,
+        engine="pydap",
+        session=session,
+        combine=options.combine,
+        parallel=True,
+        chunks=chunks,
+        **extra,
     )
+
+
+def _native_datasets(urls: list[str], session: Any, protocol: str) -> Any:
+    """The raw pydap datasets: one per OPeNDAP URL (a granule URL is one file).
+
+    A single URL returns its dataset; several return a list. This is metadata
+    plus lazy arrays, so ``.tree()`` and native operations work without
+    downloading data.
+    """
+
+    import pydap.client
+
+    datasets = [
+        pydap.client.open_url(url, protocol=protocol, session=session) for url in urls
+    ]
+    return datasets[0] if len(datasets) == 1 else datasets
 
 
 def opendap_urls(results: Any, needle: str | None = None) -> list[str]:

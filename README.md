@@ -49,19 +49,53 @@ Because the result is already a lazy, usable object, it is returned as-is by
 ds = ea.open(ea.plugins.pydap.request(results))
 ```
 
+### Access pattern (important for speed)
+
+A **single granule** is opened lazily (`xr.open_dataset`), so xarray pushes your
+subset to the OPeNDAP server as a constraint expression and only the slice you
+ask for is downloaded:
+
+```python
+ds = ea.plugins.pydap.open(one_granule)
+ds["analysed_sst"].sel(lon=slice(-98, -80), lat=slice(18, 31)).plot()
+```
+
+For **several granules** `open()` concatenates them lazily with dask
+(`combine="nested"`, `parallel=True`). Dask fetches whole chunks, so pass
+`chunks` sized to your subset or you will download far more than you need:
+
+```python
+ds = ea.plugins.pydap.open(many_granules, chunks={"lat": 400, "lon": 400})
+```
+
+### Inspect the remote file
+
+`request()` takes an `engine`: `"xarray"` (default) returns a lazy
+`xarray.Dataset`, `"pydap"` returns the native dataset from `pydap.open_url`
+(one per granule URL; a list for several). Use the native dataset to list
+variables and operations without downloading data:
+
+```python
+pyds = ea.plugins.pydap.request(results, engine="pydap").results()
+pyds.tree()
+list(pyds.keys())
+```
+
 ### Options
 
 | Option | Default | Meaning |
 | --- | --- | --- |
+| `engine` | `"xarray"` | `"xarray"` -> lazy `xarray.Dataset`; `"pydap"` -> native pydap dataset(s) |
 | `protocol` | `"dap4"` | OPeNDAP scheme: `dap4` or `dap2` |
 | `url_filter` | `None` | keep only hrefs containing this substring |
-| `combine` | `"by_coords"` | how to combine several granules: `by_coords` or `nested` |
-| `concat_dim` | `None` | required when `combine="nested"` |
+| `combine` | `"nested"` | how to combine several granules: `by_coords` or `nested` |
+| `concat_dim` | `"time"` | concat dimension when `combine="nested"` |
+| `chunks` | `None` | dask chunking for multi-granule opens (`"auto"` by default); pass e.g. `{"lat": 400, "lon": 400}` to fetch only your subset |
 
 Combining several granules into one dataset:
 
 ```python
-ds = ea.plugins.pydap.open(results, combine="nested", concat_dim="time")
+ds = ea.plugins.pydap.open(many_granules, concat_dim="time", chunks={"lat": 400, "lon": 400})
 ```
 
 ## Authentication
@@ -77,10 +111,16 @@ ea.login(strategy="netrc")
 ## Checking that a collection is supported
 
 The plugin checks the granules' UMM for an OPeNDAP link and fails early if none
-is present:
+is present. It reports OPeNDAP's operations (lazy reads, dimension/variable
+subsetting):
 
 ```python
-ea.plugins.pydap.supports(results)   # Support(ok=True/False/None, reason=...)
+ea.plugins.pydap.supports(results)
+# Capabilities('pydap supported C1996881146-POCLOUD', operations=3)
+#   operations: lazy_read, subset_dimension, subset_variable
+
+# By short name alone there are no granule links to confirm against:
+ea.plugins.pydap.capabilities("MUR-JPL-L4-GLOB-v4.1")  # ok=None
 ```
 
 ## License
