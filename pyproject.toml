@@ -21,7 +21,7 @@ dependencies = [
 pydap = "earthaccess_pydap:PyDAPPlugin"
 
 [project.optional-dependencies]
-test = ["pytest >=8.0"]
+test = ["pytest >=8.0", "mypy >=1.11", "ruff >=0.6"]
 
 [project.urls]
 Repository = "https://github.com/betolink/earthaccess-plugin-pydap"
@@ -42,7 +42,7 @@ line-length = 88
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-extend-select = ["I", "UP", "B"]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
 
 [tool.mypy]
 python_version = "3.10"
