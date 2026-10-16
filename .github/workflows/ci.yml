@@ -11,5 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
+      # The contract lives on GitHub until it is published; keep it current.
+      - run: uv lock --upgrade-package earthaccess-plugin-spec
       - run: uv sync --extra test
       - run: uv run pytest

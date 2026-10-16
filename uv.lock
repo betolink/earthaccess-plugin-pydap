@@ -344,7 +344,7 @@ wheels = [
 [[package]]
 name = "earthaccess-plugin-spec"
 version = "0.1.0"
-source = { git = "https://github.com/betolink/earthaccess-plugin-spec.git?branch=main#b4d47c87a93f0d29619c489bce6e839be87397b3" }
+source = { git = "https://github.com/betolink/earthaccess-plugin-spec.git?branch=main#04f2c60b2c48a019dc5e703091ba8edfa374a27b" }
 
 [[package]]
 name = "earthaccess-pydap"
