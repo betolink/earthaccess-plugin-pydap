@@ -29,21 +29,13 @@ import earthaccess as ea
 
 results = ea.search_data(short_name="MODISA_L2_OC", ...)
 
-ds = ea.plugins.pydap.open(results, protocol="dap4")
+ds = ea.plugins.pydap.request(results, protocol="dap4").results()
 # ds is a lazy xarray.Dataset; the data is fetched as you use it
 subset = ds["chlor_a"].sel(lat=slice(40, 50)).mean()
 ```
 
-`open()` is a shortcut for `run()`. You can also work with the job explicitly,
-or ask for the raw result:
-
-```python
-job = ea.plugins.pydap.request(results)
-ds = job.results()          # blocks until the job settles, returns the Dataset
-```
-
-Because the result is already a lazy, usable object, it is returned as-is by
-`ea.open(job)`:
+`request()` returns a `Job`; `results()` blocks and returns the dataset. Because
+that object is already lazy and usable, `ea.open(job)` returns it as-is:
 
 ```python
 ds = ea.open(ea.plugins.pydap.request(results))
@@ -56,16 +48,16 @@ subset to the OPeNDAP server as a constraint expression and only the slice you
 ask for is downloaded:
 
 ```python
-ds = ea.plugins.pydap.open(one_granule)
+ds = ea.plugins.pydap.request(one_granule).results()
 ds["analysed_sst"].sel(lon=slice(-98, -80), lat=slice(18, 31)).plot()
 ```
 
-For **several granules** `open()` concatenates them lazily with dask
+For **several granules** the plugin concatenates them lazily with dask
 (`combine="nested"`, `parallel=True`). Dask fetches whole chunks, so pass
 `chunks` sized to your subset or you will download far more than you need:
 
 ```python
-ds = ea.plugins.pydap.open(many_granules, chunks={"lat": 400, "lon": 400})
+ds = ea.plugins.pydap.request(many_granules, chunks={"lat": 400, "lon": 400}).results()
 ```
 
 ### Inspect the remote file
@@ -95,7 +87,7 @@ list(pyds.keys())
 Combining several granules into one dataset:
 
 ```python
-ds = ea.plugins.pydap.open(many_granules, concat_dim="time", chunks={"lat": 400, "lon": 400})
+ds = ea.plugins.pydap.request(many_granules, concat_dim="time", chunks={"lat": 400, "lon": 400}).results()
 ```
 
 ## Authentication

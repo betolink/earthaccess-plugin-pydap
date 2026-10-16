@@ -65,11 +65,6 @@ class PyDAPPlugin(PluginBase):
         session = self._ctx.auth.session()
         return self.job(lambda: _open(urls, session, options))
 
-    def open(self, results: Any = None, **options: Any) -> Any:
-        """Lazy open: an alias of :meth:`run`, returns the dataset directly."""
-
-        return self.run(results, **options)
-
     def _supports(self, results: Any) -> Capabilities:
         # Granule links are better evidence than a collection association,
         # because the data opened is the granule URL.

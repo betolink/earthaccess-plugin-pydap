@@ -149,13 +149,6 @@ class TestRequest:
         assert ctx.auth.session_calls == 1
         assert result is fixtures.dataset
 
-    def test_open_alias_returns_dataset(self):
-        plugin = PyDAPPlugin(fake_context())
-        fixtures = PyDAPFixtures()
-        with fixtures.backend():
-            result = plugin.open(fixtures.result_set)
-        assert result is fixtures.dataset
-
     def test_protocol_is_forwarded(self):
         captured: dict = {}
 
