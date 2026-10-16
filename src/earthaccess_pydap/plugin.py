@@ -53,7 +53,8 @@ class PyDAPPlugin(PluginBase):
         ]
         if not urls:
             raise NoOPeNDAPUrlsError(
-                f"no OPeNDAP links in the UMM for {results.collection_id}"
+                "no OPeNDAP links in the UMM for "
+                f"{getattr(results, 'short_name', '') or 'these granules'}"
             )
         constrained = [with_constraint(url, options.variables) for url in urls]
         # Login happens here, on the caller's thread, not in the worker.
@@ -79,21 +80,15 @@ class PyDAPPlugin(PluginBase):
             )
         urls = opendap_urls(results)
         if urls:
-            granules = list(getattr(results, "ids", ()) or ())
-            if len(urls) < len(granules):
-                self._ctx.logger.info(
-                    "%s: %d of %d granules have an OPeNDAP link",
-                    self.name,
-                    len(urls),
-                    len(granules),
-                )
             return Capabilities(True, operations=_OPENDAP_OPERATIONS)
         return Capabilities(False, reason="none of these granules has an OPeNDAP link")
 
 
 def _has_granules(results: Any) -> bool:
-    umm = getattr(results, "umm", None)
-    return bool(list(umm())) if callable(umm) else False
+    try:
+        return next(iter(results), None) is not None
+    except TypeError:
+        return False
 
 
 def _native_datasets(urls: list[str], session: Any, protocol: str) -> list[Any]:
@@ -105,11 +100,14 @@ def _native_datasets(urls: list[str], session: Any, protocol: str) -> list[Any]:
 
 
 def opendap_urls(results: Any, needle: str | None = None) -> list[str]:
-    """Collect OPeNDAP hrefs from the granules' UMM RelatedUrls."""
+    """Collect OPeNDAP hrefs from the granules' UMM RelatedUrls.
+
+    Streams the resultset, so only the links are retained, not every UMM record.
+    """
 
     urls: list[str] = []
-    for umm in results.umm():
-        for related in umm.get("RelatedUrls", []):
+    for granule in results:
+        for related in granule.get("umm", {}).get("RelatedUrls", []):
             kind = f"{related.get('Type', '')} {related.get('Subtype', '')}".upper()
             url = related.get("URL", "")
             if (
