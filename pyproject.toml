@@ -11,7 +11,7 @@ license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "earthaccess contributors" }]
 dependencies = [
-  "earthaccess-plugin-spec >=0.1.0",
+  "earthaccess-plugin-spec @ git+https://github.com/betolink/earthaccess-plugin-spec.git@main",
   "pydap >=3.4",
   "xarray >=2024.1",
   "netCDF4",  # pydap streaming output (used by ea.download)
@@ -26,9 +26,11 @@ test = ["pytest >=8.0", "mypy >=1.11", "ruff >=0.6"]
 [project.urls]
 Repository = "https://github.com/betolink/earthaccess-plugin-pydap"
 
-# The contract lives on GitHub until it is published to PyPI.
-[tool.uv.sources]
-earthaccess-plugin-spec = { git = "https://github.com/betolink/earthaccess-plugin-spec.git", branch = "main" }
+# The contract lives on GitHub until it is published to PyPI. A direct URL in
+# [project.dependencies] is honored by both pip and uv (pip ignores
+# [tool.uv.sources]); hatchling requires opting in.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/earthaccess_pydap"]
